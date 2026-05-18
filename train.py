@@ -1,61 +1,30 @@
 """
-train.py — Parental Control EfficientNet-B0  |  School RTX GPU Edition
-=======================================================================
-Labels  : alcohol · drugs · sexual · extremism
-Output  : exported_model/parental_control_b0_int8.tflite
-          exported_model/model_metadata.json
 
-QUICK START
-───────────
-1. Edit the CONFIG section below (DATA_DIR, WORKING_DIR).
-2. Open a terminal in the same folder as this file.
-
-   Linux / SSH:
-       pip3 install tensorflow[and-cuda] scikit-learn pillow pandas matplotlib tqdm
-       python3 train.py
-
-   Windows:
-       pip install tensorflow scikit-learn pillow pandas matplotlib tqdm
-       python train.py
-
-3. If the power goes out or you close the terminal, just run the same
-   command again — training resumes from the last saved epoch automatically.
 
 NOTES
-─────
-- Works on any NVIDIA GPU (RTX 2080, 3090, 4090, A100, …)
-- Works on Windows and Linux — paths handled by pathlib.Path
-- If no GPU found, falls back to CPU (slow but functional)
 - Dataset folder structure expected:
       DATA_DIR/
         alcohol/
         drugs/
-        tobacco/      ← merged into drugs label
+        tobacco/ 
         sexual/
         extremism/
         normal/
 """
 
-# ═══════════════════════════════════════════════════════════════════════════
-# ▶ CONFIG — EDIT THESE TWO LINES BEFORE RUNNING
-# ═══════════════════════════════════════════════════════════════════════════
+
 DATA_DIR = r"C:\Users\username\Downloads\parental_dataset"
 WORKING_DIR = r"C:\Users\username\Documents\parental_control_output"
-# Training hyperparameters — safe to leave as-is
-# ═══════════════════════════════════════════════════════════════════════════
+
 
 IMG_SIZE        = (224, 224)
-BATCH_SIZE      = 32        # reduce to 16 if GPU runs out of memory
+BATCH_SIZE      = 32
 SEED            = 42
-PHASE1_EPOCHS   = 20        # head-only training
-PHASE2_EPOCHS   = 40        # fine-tuning top 30% of backbone
+PHASE1_EPOCHS   = 20
+PHASE2_EPOCHS   = 40
 PHASE1_LR       = 1e-3
 PHASE2_LR       = 2e-5
-FREEZE_PCT      = 0.70      # freeze bottom 70% of backbone in phase 2
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 0. Imports
-# ═══════════════════════════════════════════════════════════════════════════
+FREEZE_PCT      = 0.70
 
 import json
 import logging
@@ -68,7 +37,7 @@ from pathlib import Path
 
 import keras
 import matplotlib
-matplotlib.use("Agg")   # no display needed — works over SSH and on Windows
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -94,10 +63,6 @@ from tensorflow.keras.layers import (
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.regularizers import l2
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 1. Paths  (pathlib handles / vs \ automatically)
-# ═══════════════════════════════════════════════════════════════════════════
-
 DATA_DIR    = Path(DATA_DIR)
 WORKING_DIR = Path(WORKING_DIR)
 
@@ -110,11 +75,6 @@ TEST_CSV    = WORKING_DIR / "test_clean.csv"
 
 for d in [CKPT_DIR, EXPORT_DIR, LOG_DIR]:
     d.mkdir(parents=True, exist_ok=True)
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 2. Logging — writes to terminal AND logs/training.log simultaneously
-#    So you can monitor remotely: tail -f logs/training.log
-# ═══════════════════════════════════════════════════════════════════════════
 
 log_path = LOG_DIR / "training.log"
 logging.basicConfig(
@@ -133,13 +93,8 @@ log.info(f"TensorFlow : {tf.__version__}")
 log.info(f"Working dir: {WORKING_DIR}")
 log.info(f"Data dir   : {DATA_DIR}")
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 3. Constants
-# ═══════════════════════════════════════════════════════════════════════════
-
 AUTOTUNE = tf.data.AUTOTUNE
 
-# 4 labels — extremism added
 LABELS = ["alcohol", "drugs", "sexual", "extremism"]
 
 LABEL_MAP = {
@@ -151,16 +106,10 @@ LABEL_MAP = {
     "extremism" : [0, 0, 0, 1],
 }
 
-# Per-label loss weights — extremism weighted highest (rare + high stakes)
 LABEL_WEIGHTS = [1.5, 1.5, 2.0, 2.5]
 
-# Safe image formats — GIF and WEBP excluded (TF cannot decode them safely)
 EXTS             = {".jpg", ".jpeg", ".png", ".bmp"}
 ALLOWED_PIL_FMTS = {"JPEG", "PNG", "BMP"}
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 4. GPU setup — single GPU (school RTX)
-# ═══════════════════════════════════════════════════════════════════════════
 
 def setup_gpu():
     gpus = tf.config.list_physical_devices("GPU")
@@ -170,7 +119,7 @@ def setup_gpu():
         try:
             tf.config.experimental.set_memory_growth(gpu, True)
         except RuntimeError:
-            pass  # already initialised
+            pass
 
     if gpus:
         mixed_precision.set_global_policy("mixed_float16")
@@ -182,10 +131,6 @@ def setup_gpu():
         strategy = tf.distribute.get_strategy()
 
     return strategy
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 5. Custom metric
-# ═══════════════════════════════════════════════════════════════════════════
 
 @keras.saving.register_keras_serializable(package="ParentalControl")
 class LabelAccuracy(tf.keras.metrics.Metric):
@@ -220,26 +165,14 @@ class LabelAccuracy(tf.keras.metrics.Metric):
 def get_metrics():
     return [LabelAccuracy(i, f"{lbl}_acc") for i, lbl in enumerate(LABELS)]
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 6. Loss — per-element BCE with per-label weights
-# ═══════════════════════════════════════════════════════════════════════════
-
 @keras.saving.register_keras_serializable(package="ParentalControl")
 def weighted_bce(y_true, y_pred):
-    """
-    Per-element BCE → shape (batch, 4) → apply per-label weights → scalar.
-    Extremism gets weight 2.5 because it is the rarest and highest-stakes label.
-    """
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.clip_by_value(tf.cast(y_pred, tf.float32), 1e-7, 1.0 - 1e-7)
     bce    = -(y_true * tf.math.log(y_pred)
                + (1.0 - y_true) * tf.math.log(1.0 - y_pred))
     w      = tf.constant([LABEL_WEIGHTS], dtype=tf.float32)  # (1, 4)
     return tf.reduce_mean(bce * w)
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 7. Dataset helpers
-# ═══════════════════════════════════════════════════════════════════════════
 
 def find_dataset_root(base: Path) -> Path:
     """Walk subdirs to find the folder that contains class subfolders."""
@@ -390,10 +323,6 @@ def get_splits(root: Path):
     )
     return train_df, val_df, test_df
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 8. tf.data pipeline
-# ═══════════════════════════════════════════════════════════════════════════
-
 augment_layer = tf.keras.Sequential([
     RandomFlip("horizontal"),
     RandomRotation(0.10),
@@ -404,11 +333,6 @@ augment_layer = tf.keras.Sequential([
 
 
 def load_image(path, label):
-    """
-    tf.io.decode_image reads magic bytes — not the file extension.
-    Never crashes on disguised WEBP/GIF files that slipped past the scan.
-    expand_animations=False → single frame even if somehow animated.
-    """
     raw = tf.io.read_file(path)
     img = tf.io.decode_image(
         raw, channels=3, dtype=tf.uint8, expand_animations=False
@@ -417,7 +341,6 @@ def load_image(path, label):
     img = tf.image.resize(img, IMG_SIZE)
     img = tf.cast(img, tf.float32)
     img = tf.keras.applications.efficientnet.preprocess_input(img)
-    img = tf.where(tf.math.is_finite(img), img, tf.zeros_like(img))
     return img, label
 
 
@@ -439,18 +362,10 @@ def make_ds(dataframe: pd.DataFrame,
         )
     return ds.batch(BATCH_SIZE).prefetch(AUTOTUNE)
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 9. Model
-# ═══════════════════════════════════════════════════════════════════════════
-
 def build_and_compile(strategy,
                       lr: float,
                       backbone_trainable: bool = False,
                       freeze_pct: float = 0.0):
-    """
-    Build + compile inside strategy.scope() — required for MirroredStrategy
-    and good practice for single-GPU too.
-    """
     with strategy.scope():
         inp      = Input(shape=(*IMG_SIZE, 3), name="image")
         backbone = EfficientNetB0(
@@ -471,7 +386,6 @@ def build_and_compile(strategy,
             )
         else:
             backbone.trainable = False
-            log.info("Backbone: fully frozen (head-only training)")
 
         x = GlobalAveragePooling2D(name="gap")(backbone.output)
         x = BatchNormalization(name="bn")(x)
@@ -479,7 +393,6 @@ def build_and_compile(strategy,
                    kernel_regularizer=l2(1e-4), name="fc")(x)
         x = Dropout(0.35, name="drop")(x)
 
-        # One output per label — 4 labels now including extremism
         outputs = [
             Dense(1, activation="sigmoid", dtype="float32", name=lbl)(x)
             for lbl in LABELS
@@ -501,23 +414,9 @@ def build_and_compile(strategy,
 
 
 def load_model_safe(path: Path):
-    """No custom_objects needed — registered serializable handles it."""
     return tf.keras.models.load_model(str(path))
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 10. Resume detection
-#     Checks what checkpoints already exist and returns where to continue.
-#     This is what survives a power cut — just run the script again.
-# ═══════════════════════════════════════════════════════════════════════════
-
 def detect_resume_state() -> str:
-    """
-    Returns one of:
-      'exported'    — everything done, just download outputs
-      'phase2_done' — phase 2 trained, need to export
-      'phase1_done' — phase 1 trained, need phase 2
-      'fresh'       — nothing done yet
-    """
     if (EXPORT_DIR / "parental_control_b0_int8.tflite").exists():
         return "exported"
     if (CKPT_DIR / "phase2_best.keras").exists():
@@ -528,40 +427,24 @@ def detect_resume_state() -> str:
 
 
 def find_last_epoch_ckpt(phase: str):
-    """
-    Find the highest epoch checkpoint saved during an interrupted run.
-    e.g. phase1_epoch_07.keras → resume from epoch 8.
-    Returns (path, epoch_number) or (None, 0).
-    """
     pattern  = f"{phase}_epoch_*.keras"
     ckpts    = sorted(CKPT_DIR.glob(pattern))
     if not ckpts:
         return None, 0
     latest   = ckpts[-1]
-    # extract epoch number from filename e.g. phase1_epoch_07.keras
     try:
         epoch = int(latest.stem.split("_")[-1])
     except ValueError:
         epoch = 0
     return latest, epoch
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 11. Training phases
-# ═══════════════════════════════════════════════════════════════════════════
-
 def make_callbacks(phase: str, monitor: str = "val_loss"):
-    """
-    Shared callback set for both phases.
-    Per-epoch saves mean a power cut only ever loses < 1 epoch of work.
-    """
     return [
-        # Best model (by monitor metric)
         ModelCheckpoint(
             str(CKPT_DIR / f"{phase}_best.keras"),
             monitor=monitor, mode="max" if "acc" in monitor else "min",
             save_best_only=True, verbose=1
         ),
-        # Every epoch — power-cut safety net
         ModelCheckpoint(
             str(CKPT_DIR / f"{phase}_epoch_{{epoch:02d}}.keras"),
             save_best_only=False, save_freq="epoch", verbose=0
@@ -579,14 +462,9 @@ def make_callbacks(phase: str, monitor: str = "val_loss"):
 
 
 def train_phase1(strategy, train_ds, val_ds):
-    log.info("=" * 60)
-    log.info("PHASE 1 — frozen backbone, training head only")
-    log.info("=" * 60)
-
     model, _ = build_and_compile(strategy, lr=PHASE1_LR,
                                   backbone_trainable=False)
 
-    # Resume mid-phase if interrupted
     last_ckpt, last_epoch = find_last_epoch_ckpt("phase1")
     initial_epoch = 0
     if last_ckpt and not (CKPT_DIR / "phase1_best.keras").exists():
@@ -609,22 +487,15 @@ def train_phase1(strategy, train_ds, val_ds):
 
 
 def train_phase2(strategy, train_ds, val_ds):
-    log.info("=" * 60)
-    log.info(f"PHASE 2 — fine-tuning top {int((1-FREEZE_PCT)*100)}% of backbone")
-    log.info("=" * 60)
-
     model, _ = build_and_compile(strategy, lr=PHASE2_LR,
                                   backbone_trainable=True,
                                   freeze_pct=FREEZE_PCT)
 
-    # Load phase 1 weights as starting point
     p1_ckpt = CKPT_DIR / "phase1_best.keras"
     p1      = load_model_safe(p1_ckpt)
     model.set_weights(p1.get_weights())
     del p1
-    log.info("Phase 1 weights loaded into Phase 2 model\n")
 
-    # Resume mid-phase if interrupted
     last_ckpt, last_epoch = find_last_epoch_ckpt("phase2")
     initial_epoch = 0
     if last_ckpt and not (CKPT_DIR / "phase2_best.keras").exists():
@@ -644,10 +515,6 @@ def train_phase2(strategy, train_ds, val_ds):
     best_loss = min(history.history["val_loss"])
     log.info(f"Phase 2 done — best val_loss: {best_loss:.4f}\n")
     return history
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 12. Evaluation
-# ═══════════════════════════════════════════════════════════════════════════
 
 def evaluate(model, test_ds):
     y_true_list, y_pred_list = [], []
@@ -678,16 +545,7 @@ def evaluate(model, test_ds):
     log.info("")
     return y_true, y_pred
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 13. Threshold calibration
-# ═══════════════════════════════════════════════════════════════════════════
-
 def calibrate_thresholds(y_true, y_pred) -> dict:
-    """
-    Find the threshold that maximises F1 per label.
-    These thresholds go into model_metadata.json and are read by
-    policy_engine.py at runtime to decide blur / block actions.
-    """
     colors  = ["#1D9E75", "#BA7517", "#E24B4A", "#7B2D8B"]
     optimal = {}
     fig, axes = plt.subplots(1, len(LABELS), figsize=(5 * len(LABELS), 4))
@@ -721,10 +579,6 @@ def calibrate_thresholds(y_true, y_pred) -> dict:
         log.info(f"  {lbl:<14}: {t}")
     log.info("")
     return optimal
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 14. Training history plot
-# ═══════════════════════════════════════════════════════════════════════════
 
 def plot_history(histories: list):
     combined, boundaries, acc = {}, [], 0
@@ -771,19 +625,13 @@ def plot_history(histories: list):
     plt.close()
     log.info(f"Training history plot saved: {out}\n")
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 15. Export — TFLite INT8 + metadata JSON
-# ═══════════════════════════════════════════════════════════════════════════
-
 def export_model(best_model, train_ds, optimal_thresholds: dict):
     EXPORT_DIR.mkdir(exist_ok=True)
 
-    # Full Keras model (retraining / fine-tuning later)
     keras_path = EXPORT_DIR / "parental_control_b0.keras"
     best_model.save(str(keras_path))
     log.info(f".keras saved: {keras_path}")
 
-    # TFLite INT8 quantised
     converter = tf.lite.TFLiteConverter.from_keras_model(best_model)
 
     def rep_data():
@@ -808,7 +656,6 @@ def export_model(best_model, train_ds, optimal_thresholds: dict):
         f"(was {keras_mb:.1f} MB, {keras_mb/tflite_mb:.1f}× smaller)"
     )
 
-    # Metadata JSON — read by policy_engine.py at runtime
     metadata = {
         "model_name"         : "ParentalControl_EfficientNetB0_MultiLabel",
         "version"            : "2.0",
@@ -835,11 +682,6 @@ def export_model(best_model, train_ds, optimal_thresholds: dict):
 
     return tflite_path
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 16. TFLite verification
-# ═══════════════════════════════════════════════════════════════════════════
-
 def verify_tflite(tflite_path: Path, test_ds):
     interp = tf.lite.Interpreter(model_path=str(tflite_path))
     interp.allocate_tensors()
@@ -863,12 +705,7 @@ def verify_tflite(tflite_path: Path, test_ds):
 
     log.info("TFLite verified — ready to deploy\n")
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 17. Main — fully resumable after power cut or SSH disconnect
-# ═══════════════════════════════════════════════════════════════════════════
-
 def main():
-    # Validate paths
     if not DATA_DIR.exists():
         log.error(f"Data directory not found: {DATA_DIR}")
         log.error("Edit DATA_DIR at the top of this file and try again.")
@@ -876,7 +713,6 @@ def main():
 
     strategy = setup_gpu()
 
-    # Dataset
     root = find_dataset_root(DATA_DIR)
     inspect_dataset(root)
     train_df, val_df, test_df = get_splits(root)
@@ -889,7 +725,6 @@ def main():
         f"val:{len(val_ds)}  test:{len(test_ds)}\n"
     )
 
-    # Resume detection — figures out where we left off
     state = detect_resume_state()
     log.info(f"Resume state: {state}\n")
 
@@ -900,25 +735,21 @@ def main():
 
     histories = []
 
-    # Phase 1
     if state == "fresh":
         h1 = train_phase1(strategy, train_ds, val_ds)
         histories.append(h1)
     else:
         log.info("Phase 1 already done — skipping\n")
 
-    # Phase 2
     if state in ("fresh", "phase1_done"):
         h2 = train_phase2(strategy, train_ds, val_ds)
         histories.append(h2)
     else:
         log.info("Phase 2 already done — loading best model\n")
 
-    # Plot training curves
     if histories:
         plot_history(histories)
 
-    # Load best model and evaluate
     log.info("Loading phase2_best.keras ...")
     best_model = load_model_safe(CKPT_DIR / "phase2_best.keras")
     log.info("Loaded\n")
