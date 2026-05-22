@@ -187,17 +187,137 @@ python train.py
 
 ## GPU support
 
-The script auto-detects and uses the best available accelerator:
+The script auto-detects the best available accelerator at startup via `setup_gpu()` and configures training accordingly. No code changes are required when switching hardware.
 
-| Hardware | Backend | Install |
-|---|---|---|
-| Apple Silicon (M-series) | Metal | `pip install tensorflow-metal` |
-| NVIDIA GPU | CUDA | `pip install tensorflow[and-cuda]` |
-| Any CPU | CPU | No extra packages — automatic fallback |
+### How detection works
 
-For multi-GPU NVIDIA setups, `MirroredStrategy` is used automatically when more than one GPU is detected.
+```
+startup
+  │
+  ├─ arm64 macOS? ──yes──► tensorflow-metal installed? ──yes──► Metal GPU (/GPU:0)
+  │                                                     └──no──► CPU (with warning)
+  │
+  ├─ CUDA GPU present? ──yes──► 1 GPU? ──► OneDeviceStrategy (/gpu:0)
+  │                             └─ >1 GPU? ─► MirroredStrategy (all GPUs)
+  │
+  └─ nothing found ──► CPU fallback (warning logged)
+```
+
+Mixed-precision (`float16` compute, `float32` weights) is enabled automatically on all GPU paths for a significant speed boost.
+
+### Apple Silicon (M-series)
+
+Requires **TF 2.18** + `tensorflow-metal 1.2.0` (TF 2.21+ is not yet supported by tensorflow-metal):
+
+```bash
+pip install "tensorflow==2.18.0" tensorflow-metal
+```
+
+What happens at runtime:
+- The Metal plugin is auto-registered when TensorFlow is imported — no explicit `import` needed.
+- The GPU appears as `/physical_device:GPU:0` with device name `METAL`.
+- Memory growth is enabled automatically so the GPU doesn't pre-allocate all unified memory.
+- `mixed_float16` is applied — Metal supports float16 natively, giving ~2× throughput over float32.
+
+> **Sleep prevention (macOS):** The laptop will go to sleep during long runs unless you run:
+> ```bash
+> caffeinate -disum -w $(pgrep -f "python train.py") &
+> ```
+> `-d` prevents display sleep, `-i` idle sleep, `-s` AC sleep, `-u` keeps user session active.
+
+### NVIDIA GPU (CUDA)
+
+Works on Linux and Windows with a CUDA-capable GPU (Kepler/GTX 700+):
+
+```bash
+pip install tensorflow[and-cuda]   # installs CUDA/cuDNN automatically
+```
+
+What happens at runtime:
+- `mixed_float16` is applied. Full benefit requires Volta architecture (GTX 1080 Ti / V100) or newer — older cards run float16 but without tensor core acceleration.
+- Memory growth is enabled — the GPU allocates VRAM on demand rather than reserving it all upfront.
+- **Single GPU:** `OneDeviceStrategy(/gpu:0)` — all training on one device.
+- **Multiple GPUs:** `MirroredStrategy` is selected automatically. Gradients are synchronised across all devices at each step; effective batch size scales with the number of GPUs.
+
+Minimum VRAM requirements at `BATCH_SIZE = 128`:
+
+| GPU VRAM | Batch size |
+|---|---|
+| 4 GB | Reduce to 32–64 |
+| 8 GB | 64–128 |
+| 12 GB+ | 128 (default) |
+| 24 GB+ | 256+ for faster training |
+
+> If you hit OOM errors, reduce `BATCH_SIZE` at the top of `train.py`.
+
+### Google Colab (free T4 GPU)
+
+Colab provides a free NVIDIA T4 (16 GB VRAM). No local install needed:
+
+1. Upload the dataset to Google Drive.
+2. Open a new Colab notebook and mount Drive:
+   ```python
+   from google.colab import drive
+   drive.mount("/content/drive")
+   ```
+3. Clone this repo and set env vars:
+   ```bash
+   !git clone https://github.com/grindqueue/thesis_model_train.git
+   %cd thesis_model_train
+   !pip install scikit-learn matplotlib pillow pandas
+   ```
+   ```python
+   import os
+   os.environ["DATA_DIR"]    = "/content/drive/MyDrive/DATASET_IMAGES"
+   os.environ["WORKING_DIR"] = "/content/drive/MyDrive/output"
+   ```
+4. Run training:
+   ```bash
+   !python train.py
+   ```
+
+> Colab disconnects after ~12 hrs of inactivity. Training is resumable — re-run `train.py` to continue from the last completed phase.
+
+### CPU only
+
+No extra packages. Set a smaller batch size to avoid excessive RAM use:
+
+```python
+BATCH_SIZE = 32   # reduce if RAM < 16 GB
+```
+
+CPU training is very slow (see timing table above). Use Colab or a cloud GPU instead for full training runs.
+
+### Verifying your GPU is being used
+
+Check the log output at the start of training:
+
+```
+# Apple Silicon
+INFO  GPUs found : ['/physical_device:GPU:0']
+INFO  Apple Silicon detected — tensorflow-metal plugin loaded
+INFO  mixed_float16 precision enabled
+INFO  Using GPU: /physical_device:GPU:0  [Metal (Apple Silicon)]
+
+# NVIDIA single GPU
+INFO  GPUs found : ['/physical_device:GPU:0']
+INFO  mixed_float16 precision enabled
+INFO  Using GPU: /physical_device:GPU:0  [CUDA]
+
+# NVIDIA multi-GPU
+INFO  GPUs found : ['/physical_device:GPU:0', '/physical_device:GPU:1']
+INFO  mixed_float16 precision enabled
+INFO  Multi-GPU: MirroredStrategy across 2 GPUs
+
+# No GPU
+WARNING  No GPU found — running on CPU (will be slow)
+```
+
+
 
 ### Estimated training times
+
+Both phases together (20 + 40 epochs, ~79 k images):
 
 | Hardware | Time per epoch | Total (60 epochs) |
 |---|---|---|
@@ -207,11 +327,6 @@ For multi-GPU NVIDIA setups, `MirroredStrategy` is used automatically when more 
 | NVIDIA RTX 3080 (CUDA, batch 128) | ~4–5 min | ~4–5 hrs |
 | NVIDIA T4 (Google Colab, batch 64) | ~8–10 min | ~8–10 hrs |
 | Modern CPU only (batch 32) | ~40–60 min | ~2–3 days |
-
-> **Tip (macOS):** Prevent your Mac from sleeping during a long run:
-> ```bash
-> caffeinate -disum -w $(pgrep -f "python train.py") &
-> ```
 
 ### Reducing training time
 
