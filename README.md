@@ -157,28 +157,45 @@ Validation accuracy after full training (Phase 2, 40 epochs):
 
 ---
 
-## Deployment
+## Pre-trained Model
 
-The deployment target is `parental_control_b0_int8.tflite` + `model_metadata.json`.
+The trained model is published on Hugging Face Hub:
+**[damilareisaac/parental-control-efficientnet-b0](https://huggingface.co/damilareisaac/parental-control-efficientnet-b0)**
+
+### Download & run inference
+
+```bash
+pip install huggingface_hub tensorflow pillow
+```
 
 ```python
-import tensorflow as tf, json, numpy as np
+import tensorflow as tf, numpy as np, json
+from huggingface_hub import hf_hub_download
 from PIL import Image
 
-meta = json.load(open("exported_model/model_metadata.json"))
-interp = tf.lite.Interpreter("exported_model/parental_control_b0_int8.tflite")
-interp.allocate_tensors()
+REPO = "damilareisaac/parental-control-efficientnet-b0"
 
-img = Image.open("image.jpg").resize(tuple(meta["input_size"]))
+# Download model and metadata (cached locally after first run)
+model_path = hf_hub_download(REPO, "parental_control_b0.keras")
+meta       = json.load(open(hf_hub_download(REPO, "model_metadata.json")))
+
+model = tf.keras.models.load_model(model_path)
+
+img = Image.open("image.jpg").convert("RGB").resize(tuple(meta["input_size"]))
 arr = np.expand_dims(np.array(img, dtype=np.float32), 0)
+scores = model.predict(arr)[0]
 
-interp.set_tensor(interp.get_input_details()[0]["index"], arr)
-interp.invoke()
-scores = interp.get_tensor(interp.get_output_details()[0]["index"])[0]
-
-for label, score, threshold in zip(
-    meta["labels"], scores, meta["optimal_thresholds"].values()
-):
-    print(f"{label}: {score:.2f}  {'⚠️ FLAGGED' if score > threshold else 'ok'}")
+for label, score in zip(meta["labels"], scores):
+    flagged = score > meta["optimal_thresholds"][label]
+    print(f"{label:<12} {score:.3f}  {'⚠️  FLAGGED' if flagged else '✅ ok'}")
 ```
+
+### Available files on HF Hub
+
+| File | Size | Purpose |
+|---|---|---|
+| `parental_control_b0.keras` | ~44 MB | Full model — inference & fine-tuning |
+| `model_metadata.json` | < 1 KB | Labels, thresholds, input spec |
+| `training_history.png` | 197 KB | Loss & accuracy curves |
+| `threshold_calibration.png` | 81 KB | Per-label threshold calibration |
  
