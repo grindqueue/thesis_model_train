@@ -29,36 +29,62 @@ DATA_DIR/
 ### 1. Install Python 3.12
 
 ```bash
-brew install python@3.12   # macOS
+brew install python@3.12          # macOS (Homebrew)
+sudo apt install python3.12       # Ubuntu/Debian
+winget install Python.Python.3.12 # Windows
 ```
 
-> Python 3.12 is required for `tensorflow-metal` (Apple Silicon GPU support).
+> Python 3.12 is required for `tensorflow-metal` compatibility on Apple Silicon. Python 3.11+ works fine on Linux/Windows.
 
 ### 2. Create a virtual environment and install dependencies
 
+**Apple Silicon (M-series Mac)**
 ```bash
 python3.12 -m venv venv
 source venv/bin/activate
+pip install "tensorflow==2.18.0" tensorflow-metal
+pip install scikit-learn matplotlib pillow pandas kaggle
+```
 
-pip install tensorflow tensorflow-metal   # Apple Silicon (Metal GPU)
-# pip install tensorflow                  # Linux / NVIDIA CUDA (metal not needed)
+**NVIDIA GPU (Linux / Windows)**
+```bash
+python3 -m venv venv
+source venv/bin/activate          # Linux
+# venv\Scripts\activate           # Windows
+pip install tensorflow[and-cuda]  # pulls CUDA deps automatically
+pip install scikit-learn matplotlib pillow pandas kaggle
+```
+
+**CPU only (any platform)**
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install tensorflow
 pip install scikit-learn matplotlib pillow pandas kaggle
 ```
 
 ### 3. Download the dataset
 
 ```bash
-# Requires a Kaggle API token (~/.kaggle/kaggle.json or KAGGLE_TOKEN env var)
+# Requires a Kaggle API token at ~/.kaggle/kaggle.json
 kaggle datasets download -d sofialitvin/dataset-images -p dataset/ --unzip
 ```
 
 ### 4. Configure paths
 
-Edit the two path constants at the top of `train.py`:
+Either edit the two constants at the top of `train.py`:
 
 ```python
 DATA_DIR    = "/path/to/dataset/DATASET_IMAGES"
 WORKING_DIR = "/path/to/output"
+```
+
+Or pass them as environment variables (no code change needed):
+
+```bash
+export DATA_DIR="/path/to/dataset/DATASET_IMAGES"
+export WORKING_DIR="/path/to/output"
+python train.py
 ```
 
 ---
@@ -83,16 +109,41 @@ Training runs in two phases:
 
 The script auto-detects and uses the best available accelerator:
 
-| Hardware | Backend | How |
+| Hardware | Backend | Install |
 |---|---|---|
-| Apple Silicon (M-series) | Metal | Install `tensorflow-metal` |
-| NVIDIA GPU | CUDA | Standard TF CUDA support |
-| No GPU | CPU | Automatic fallback (slow) |
+| Apple Silicon (M-series) | Metal | `pip install tensorflow-metal` |
+| NVIDIA GPU | CUDA | `pip install tensorflow[and-cuda]` |
+| Any CPU | CPU | No extra packages — automatic fallback |
 
-**Prevent your Mac from sleeping during training:**
-```bash
-caffeinate -disum -w $(pgrep -f "python train.py") &
-```
+For multi-GPU NVIDIA setups, `MirroredStrategy` is used automatically when more than one GPU is detected.
+
+### Estimated training times
+
+Training time depends heavily on batch size (default 128) and hardware. The two phases together (20 + 40 epochs) on ~79 k images:
+
+| Hardware | Approx. time per epoch | Approx. total (60 epochs) |
+|---|---|---|
+| Apple M3 / M4 (Metal, batch 128) | ~4 min | ~4 hrs |
+| Apple M1 / M2 (Metal, batch 128) | ~6–8 min | ~6–8 hrs |
+| NVIDIA RTX 4090 (CUDA, batch 128) | ~2–3 min | ~2–3 hrs |
+| NVIDIA RTX 3080 (CUDA, batch 128) | ~4–5 min | ~4–5 hrs |
+| NVIDIA T4 (Google Colab, batch 64) | ~8–10 min | ~8–10 hrs |
+| Modern CPU only (batch 32) | ~40–60 min | ~2–3 days |
+
+> **Tip (macOS):** Prevent your Mac from sleeping during a long run:
+> ```bash
+> caffeinate -disum -w $(pgrep -f "python train.py") &
+> ```
+
+### Reducing training time
+
+| Technique | How | Effect |
+|---|---|---|
+| Larger batch size | Set `BATCH_SIZE = 128` or higher | 2–4× fewer steps/epoch |
+| Enable GPU | See GPU Support above | 10–50× vs CPU |
+| Fewer epochs | Reduce `PHASE1_EPOCHS` / `PHASE2_EPOCHS` | Linear reduction |
+| Reduce dataset | Train on a class-balanced subset | Proportional reduction |
+| Google Colab (free T4) | Upload dataset to Google Drive, run there | Free GPU |
 
 ---
 
