@@ -13,12 +13,17 @@ NOTES
 """
 
 
-DATA_DIR = r"C:\Users\username\Downloads\parental_dataset"
-WORKING_DIR = r"C:\Users\username\Documents\parental_control_output"
+# ── Edit these two paths before running ───────────────────────────────────────
+# DATA_DIR    → folder that contains the class sub-directories (alcohol/, drugs/, …)
+# WORKING_DIR → output folder (created automatically if it does not exist)
+import os as _os
+DATA_DIR    = _os.environ.get("DATA_DIR",    "/path/to/dataset/DATASET_IMAGES")
+WORKING_DIR = _os.environ.get("WORKING_DIR", "/path/to/output")
+# ──────────────────────────────────────────────────────────────────────────────
 
 
 IMG_SIZE        = (224, 224)
-BATCH_SIZE      = 32
+BATCH_SIZE      = 128
 SEED            = 42
 PHASE1_EPOCHS   = 20
 PHASE2_EPOCHS   = 40
@@ -111,7 +116,43 @@ LABEL_WEIGHTS = [1.5, 1.5, 2.0, 2.5]
 EXTS             = {".jpg", ".jpeg", ".png", ".bmp"}
 ALLOWED_PIL_FMTS = {"JPEG", "PNG", "BMP"}
 
+
+def _is_apple_silicon() -> bool:
+    return platform.system() == "Darwin" and platform.machine() == "arm64"
+
+def _try_load_metal() -> bool:
+    """Check whether the tensorflow-metal plugin is installed.
+    TF auto-registers it from its plugins directory at import time,
+    so we only need to verify the package exists."""
+    try:
+        from importlib.metadata import packages_distributions
+        return "tensorflow-metal" in {
+            pkg for pkgs in packages_distributions().values() for pkg in pkgs
+        }
+    except Exception:
+        return False
+
 def setup_gpu():
+    """
+    GPU detection priority:
+      1. Apple Silicon (arm64 macOS)  → tensorflow-metal plugin → /GPU:0 (Metal)
+      2. NVIDIA / other CUDA GPU      → standard TF CUDA         → /GPU:0
+      3. No GPU available             → CPU fallback
+    Mixed-precision is enabled for all GPU paths.
+    """
+    apple_silicon = _is_apple_silicon()
+
+    if apple_silicon:
+        metal_loaded = _try_load_metal()
+        if metal_loaded:
+            log.info("Apple Silicon detected — tensorflow-metal plugin loaded")
+        else:
+            log.warning(
+                "Apple Silicon detected but tensorflow-metal is not installed.\n"
+                "  Install it with:  pip install tensorflow-metal\n"
+                "  Falling back to CPU."
+            )
+
     gpus = tf.config.list_physical_devices("GPU")
     log.info(f"GPUs found : {[g.name for g in gpus]}")
 
@@ -122,10 +163,18 @@ def setup_gpu():
             pass
 
     if gpus:
+        # Mixed float16 gives a big speed boost on both Metal and CUDA.
+        # Note: Metal (MPS) supports float16 natively; CUDA needs Volta+ for full benefit.
         mixed_precision.set_global_policy("mixed_float16")
-        log.info("mixed_float16 enabled")
-        strategy = tf.distribute.OneDeviceStrategy("/gpu:0")
-        log.info(f"Using GPU: {gpus[0].name}\n")
+        log.info("mixed_float16 precision enabled")
+
+        if len(gpus) > 1:
+            strategy = tf.distribute.MirroredStrategy()
+            log.info(f"Multi-GPU: MirroredStrategy across {len(gpus)} GPUs\n")
+        else:
+            strategy = tf.distribute.OneDeviceStrategy("/gpu:0")
+            backend = "Metal (Apple Silicon)" if apple_silicon else "CUDA"
+            log.info(f"Using GPU: {gpus[0].name}  [{backend}]\n")
     else:
         log.warning("No GPU found — running on CPU (will be slow)")
         strategy = tf.distribute.get_strategy()
@@ -352,9 +401,12 @@ def make_ds(dataframe: pd.DataFrame,
         dataframe[LABELS].values, dtype=tf.float32
     )
     ds = tf.data.Dataset.from_tensor_slices((paths, labels))
+    ds = ds.map(load_image, num_parallel_calls=AUTOTUNE)
+    # Cache decoded images in RAM — eliminates disk I/O from epoch 2 onward.
+    # Safe on M4 Max (64 GB): ~59k train images × 224×224×3 float16 ≈ 1.8 GB.
+    ds = ds.cache()
     if shuffle:
         ds = ds.shuffle(len(dataframe), seed=SEED, reshuffle_each_iteration=True)
-    ds = ds.map(load_image, num_parallel_calls=AUTOTUNE)
     if do_augment:
         ds = ds.map(
             lambda x, y: (augment_layer(x, training=True), y),
