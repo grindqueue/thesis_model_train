@@ -1,30 +1,117 @@
 # Parental Control Image Classifier — EfficientNetB0
 
-A multi-label image classifier that detects NSFW/harmful content across 4 categories: **alcohol**, **drugs**, **sexual**, and **extremism**. Built with TensorFlow/Keras on top of EfficientNetB0, exported to TFLite INT8 for on-device deployment.
+[![Hugging Face](https://img.shields.io/badge/🤗%20Hugging%20Face-damilareisaac%2Fparental--control--efficientnet--b0-blue)](https://huggingface.co/damilareisaac/parental-control-efficientnet-b0)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![Dataset](https://img.shields.io/badge/Dataset-Kaggle-20beff)](https://www.kaggle.com/datasets/sofialitvin/dataset-images)
+
+A multi-label image classifier that detects NSFW/harmful content across 4 categories: **alcohol**, **drugs**, **sexual**, and **extremism**. Built with TensorFlow/Keras on top of EfficientNetB0, trained on ~79 k images.
 
 ---
 
-## Dataset
+## 🤗 Pre-trained Model
 
-Download from Kaggle: [`sofialitvin/dataset-images`](https://www.kaggle.com/datasets/sofialitvin/dataset-images)
+> **The trained model is freely available on Hugging Face Hub — no sign-in required.**
+>
+> **[damilareisaac/parental-control-efficientnet-b0](https://huggingface.co/damilareisaac/parental-control-efficientnet-b0)**
 
-Expected folder structure after download:
+### Quick start (inference only — no training needed)
 
-```
-DATA_DIR/
-  alcohol/
-  drugs/
-  tobacco/       ← merged into "drugs" label
-  sexual/
-  extremism/
-  normal/
+```bash
+pip install huggingface_hub tensorflow pillow
 ```
 
-> **Note:** `tobacco` images are automatically merged into the `drugs` label during training.
+```python
+import tensorflow as tf, numpy as np, json
+from huggingface_hub import hf_hub_download
+from PIL import Image
+
+REPO = "damilareisaac/parental-control-efficientnet-b0"
+
+# Downloads and caches model + metadata (~44 MB, first run only)
+model_path = hf_hub_download(REPO, "parental_control_b0.keras")
+meta       = json.load(open(hf_hub_download(REPO, "model_metadata.json")))
+
+model = tf.keras.models.load_model(model_path)
+
+img = Image.open("image.jpg").convert("RGB").resize(tuple(meta["input_size"]))
+arr = np.expand_dims(np.array(img, dtype=np.float32), 0)
+scores = model.predict(arr)[0]
+
+for label, score in zip(meta["labels"], scores):
+    flagged = score > meta["optimal_thresholds"][label]
+    print(f"{label:<12} {score:.3f}  {'⚠️  FLAGGED' if flagged else '✅ ok'}")
+```
+
+### Model performance
+
+| Label | Val Accuracy | Val Loss |
+|---|---|---|
+| alcohol | **99.6%** | — |
+| extremism | **99.5%** | — |
+| sexual | **99.0%** | — |
+| drugs | **98.2%** | — |
+| **Overall best val_loss** | — | **0.0948** |
+
+### Files available on HF Hub
+
+| File | Size | Purpose |
+|---|---|---|
+| `parental_control_b0.keras` | ~44 MB | Full model — inference & fine-tuning |
+| `model_metadata.json` | < 1 KB | Labels, thresholds, input spec |
+| `training_history.png` | 197 KB | Loss & accuracy curves |
+| `threshold_calibration.png` | 81 KB | Per-label threshold calibration |
 
 ---
 
-## Setup
+## About the model
+
+### Architecture
+
+| Property | Value |
+|---|---|
+| Base | EfficientNetB0 (ImageNet pre-trained) |
+| Total parameters | 4,383,655 |
+| Input size | 224 × 224 × 3 (RGB) |
+| Output | 4 independent sigmoid scores (multi-label) |
+| Labels | `alcohol`, `drugs`, `sexual`, `extremism` |
+| Precision | mixed_float16 during training |
+
+### Training strategy
+
+Training uses a two-phase fine-tuning approach:
+
+| Phase | Epochs | Layers trained | Learning rate |
+|---|---|---|---|
+| 1 — Head only | 20 | Custom classification head | 1e-3 |
+| 2 — Fine-tune | 40 | Head + top 30% of EfficientNetB0 backbone | 2e-5 |
+
+Loss is weighted binary cross-entropy with higher penalties for harder/rarer classes:
+
+| Label | Weight |
+|---|---|
+| alcohol | 1.5 |
+| drugs | 1.5 |
+| sexual | 2.0 |
+| extremism | 2.5 |
+
+### Dataset
+
+~79 k images from Kaggle [`sofialitvin/dataset-images`](https://www.kaggle.com/datasets/sofialitvin/dataset-images):
+
+| Class | Images |
+|---|---|
+| normal | 23,332 |
+| alcohol | 13,837 |
+| tobacco (→ merged into drugs) | 14,025 |
+| sexual | 14,178 |
+| drugs | 5,649 |
+| extremism | 7,912 |
+
+> `tobacco` images are merged into the `drugs` label during training.
+
+---
+
+## Training from scratch
 
 ### 1. Install Python 3.12
 
@@ -87,25 +174,18 @@ export WORKING_DIR="/path/to/output"
 python train.py
 ```
 
----
-
-## Training
+### 5. Run training
 
 ```bash
 source venv/bin/activate
 python train.py
 ```
 
-Training runs in two phases:
-
-| Phase | Epochs | What trains |
-|---|---|---|
-| 1 | 20 | Head only (backbone frozen) |
-| 2 | 40 | Head + top 30% of backbone (fine-tune) |
-
 **Resumable** — if interrupted, re-running `train.py` picks up from the last completed phase automatically.
 
-### GPU Support
+---
+
+## GPU support
 
 The script auto-detects and uses the best available accelerator:
 
@@ -119,9 +199,7 @@ For multi-GPU NVIDIA setups, `MirroredStrategy` is used automatically when more 
 
 ### Estimated training times
 
-Training time depends heavily on batch size (default 128) and hardware. The two phases together (20 + 40 epochs) on ~79 k images:
-
-| Hardware | Approx. time per epoch | Approx. total (60 epochs) |
+| Hardware | Time per epoch | Total (60 epochs) |
 |---|---|---|
 | Apple M3 / M4 (Metal, batch 128) | ~4 min | ~4 hrs |
 | Apple M1 / M2 (Metal, batch 128) | ~6–8 min | ~6–8 hrs |
@@ -142,24 +220,7 @@ Training time depends heavily on batch size (default 128) and hardware. The two 
 | Larger batch size | Set `BATCH_SIZE = 128` or higher | 2–4× fewer steps/epoch |
 | Enable GPU | See GPU Support above | 10–50× vs CPU |
 | Fewer epochs | Reduce `PHASE1_EPOCHS` / `PHASE2_EPOCHS` | Linear reduction |
-| Reduce dataset | Train on a class-balanced subset | Proportional reduction |
 | Google Colab (free T4) | Upload dataset to Google Drive, run there | Free GPU |
-
----
-
-## Training Configuration
-
-| Parameter | Value |
-|---|---|
-| Base model | EfficientNetB0 (ImageNet weights) |
-| Input size | 224 × 224 |
-| Batch size | 128 |
-| Phase 1 LR | 1e-3 |
-| Phase 2 LR | 2e-5 |
-| Backbone freeze | Bottom 70% frozen in Phase 2 |
-| Precision | mixed_float16 (GPU) |
-| Loss | Weighted binary cross-entropy |
-| Label weights | alcohol=1.5, drugs=1.5, sexual=2.0, extremism=2.5 |
 
 ---
 
@@ -171,11 +232,10 @@ All outputs are written to `WORKING_DIR/`:
 output/
   checkpoints/
     phase1_best.keras          ← best Phase 1 weights
-    phase2_best.keras          ← best Phase 2 weights (use this)
+    phase2_best.keras          ← best Phase 2 weights (primary result)
   exported_model/
-    parental_control_b0.keras           ← full float32 model (~17.5 MB)
-    parental_control_b0_int8.tflite     ← INT8 quantised (~4.4 MB) ← deploy this
-    model_metadata.json                 ← labels, thresholds, input spec
+    parental_control_b0.keras  ← full exported model (~44 MB)
+    model_metadata.json        ← labels, thresholds, input spec
     training_history.png
     threshold_calibration.png
   logs/
@@ -183,70 +243,3 @@ output/
   train_clean.csv / val_clean.csv / test_clean.csv
 ```
 
----
-
-## Model Size
-
-| Format | Size | Parameters |
-|---|---|---|
-| `.keras` float32 | ~17.5 MB | 4,383,655 |
-| `.keras` float16 | ~8.8 MB | 4,383,655 |
-| TFLite INT8 | **~4.4 MB** | 4,383,655 |
-
----
-
-## Results
-
-Validation accuracy after full training (Phase 2, 40 epochs):
-
-| Label | Val Accuracy |
-|---|---|
-| alcohol | ~99.6% |
-| extremism | ~99.5% |
-| sexual | ~99.0% |
-| drugs | ~98.2% |
-
----
-
-## Pre-trained Model
-
-The trained model is published on Hugging Face Hub:
-**[damilareisaac/parental-control-efficientnet-b0](https://huggingface.co/damilareisaac/parental-control-efficientnet-b0)**
-
-### Download & run inference
-
-```bash
-pip install huggingface_hub tensorflow pillow
-```
-
-```python
-import tensorflow as tf, numpy as np, json
-from huggingface_hub import hf_hub_download
-from PIL import Image
-
-REPO = "damilareisaac/parental-control-efficientnet-b0"
-
-# Download model and metadata (cached locally after first run)
-model_path = hf_hub_download(REPO, "parental_control_b0.keras")
-meta       = json.load(open(hf_hub_download(REPO, "model_metadata.json")))
-
-model = tf.keras.models.load_model(model_path)
-
-img = Image.open("image.jpg").convert("RGB").resize(tuple(meta["input_size"]))
-arr = np.expand_dims(np.array(img, dtype=np.float32), 0)
-scores = model.predict(arr)[0]
-
-for label, score in zip(meta["labels"], scores):
-    flagged = score > meta["optimal_thresholds"][label]
-    print(f"{label:<12} {score:.3f}  {'⚠️  FLAGGED' if flagged else '✅ ok'}")
-```
-
-### Available files on HF Hub
-
-| File | Size | Purpose |
-|---|---|---|
-| `parental_control_b0.keras` | ~44 MB | Full model — inference & fine-tuning |
-| `model_metadata.json` | < 1 KB | Labels, thresholds, input spec |
-| `training_history.png` | 197 KB | Loss & accuracy curves |
-| `threshold_calibration.png` | 81 KB | Per-label threshold calibration |
- 
