@@ -1,0 +1,44 @@
+# Dataset — too large to check in (download from Kaggle: sofialitvin/dataset-images)
+dataset/
+data/
+
+# Training outputs
+output/
+checkpoints/
+exported_model/
+logs/
+*.log
+*.csv
+
+# Model weights & exports
+*.keras
+*.tflite
+*.h5
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+venv/
+.venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# IDE
+.vscode/
+.idea/
+
+# Kaggle credentials
+kaggle.json
+*.token
