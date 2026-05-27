@@ -1,0 +1,55 @@
+{
+  "model_name": "ParentalControl_EfficientNetB0_MultiLabel",
+  "version": "2.0",
+  "architecture": "EfficientNetB0 + multi-label sigmoid head",
+  "labels": [
+    "alcohol",
+    "drugs",
+    "sexual",
+    "extremism"
+  ],
+  "label_indices": {
+    "alcohol": 0,
+    "drugs": 1,
+    "sexual": 2,
+    "extremism": 3
+  },
+  "input_size": [
+    224,
+    224
+  ],
+  "preprocessing": "efficientnet.preprocess_input \u2014 scales [0,255] to [-1,1] internally",
+  "output_type": "multi_label_sigmoid",
+  "output_order": [
+    "alcohol",
+    "drugs",
+    "sexual",
+    "extremism"
+  ],
+  "optimal_thresholds": {
+    "alcohol": 0.83,
+    "drugs": 0.898,
+    "sexual": 0.314,
+    "extremism": 0.295
+  },
+  "label_weights": {
+    "alcohol": 1.5,
+    "drugs": 1.5,
+    "sexual": 2.0,
+    "extremism": 2.5
+  },
+  "total_params": 4383655,
+  "val_accuracy": {
+    "alcohol": 0.996,
+    "extremism": 0.995,
+    "sexual": 0.99,
+    "drugs": 0.982
+  },
+  "val_loss": 0.0948,
+  "trained_on": "macOS-26.4.1-arm64-arm-64bit",
+  "training": {
+    "phase1_epochs": 20,
+    "phase2_epochs": 40,
+    "batch_size": 128
+  }
+}
